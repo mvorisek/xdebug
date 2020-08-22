@@ -29,16 +29,19 @@ typedef void (WINAPI *WIN_PRECISE_TIME_FUNC)(LPFILETIME);
 #endif
 
 typedef struct _xdebug_nanotime_context {
-	uint64_t start_abs;
-	uint64_t last_abs;
+	uint64_t     start_abs;
+	uint64_t     last_abs;
 #if PHP_WIN32 | __APPLE__ | CLOCK_MONOTONIC
-	uint64_t start_rel;
-	uint64_t last_rel;
-	int      use_rel_time;
+	uint64_t     start_rel;
+	uint64_t     last_rel;
+	unsigned int use_rel_time;
 #endif
 #if PHP_WIN32
 	WIN_PRECISE_TIME_FUNC win_precise_time_func;
-	uint64_t win_freq;
+	uint64_t     win_freq;
+	uint64_t     start_rdtsc;
+	double       rdtsc_to_nanos;
+	uint64_t     last_abs_rdtsc;
 #endif
 } xdebug_nanotime_context;
 

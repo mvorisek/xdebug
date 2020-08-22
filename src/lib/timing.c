@@ -30,7 +30,7 @@
 
 #include "timing.h"
 
-#define NANOTIME_MIN_STEP 10
+#define NANOTIME_MIN_STEP 2
 
 #if PHP_WIN32
 # define WIN_NANOS_IN_TICK          100
@@ -39,7 +39,7 @@
 
 ZEND_EXTERN_MODULE_GLOBALS(xdebug)
 
-static uint64_t xdebug_get_nanotime_abs(xdebug_nanotime_context *nanotime_context)
+static inline uint64_t xdebug_get_nanotime_abs(xdebug_nanotime_context *nanotime_context)
 {
 #if PHP_WIN32
 	// Windows, win_precise_time_func is only available on Win 8 and later.
@@ -73,7 +73,7 @@ static uint64_t xdebug_get_nanotime_abs(xdebug_nanotime_context *nanotime_contex
 }
 
 #if PHP_WIN32
-static uint64_t xdebug_counter_and_freq_to_nanotime(uint64_t counter, uint64_t freq)
+static inline uint64_t xdebug_counter_and_freq_to_nanotime(uint64_t counter, uint64_t freq)
 {
 	uint32_t mul = 1, freq32;
 	uint64_t q, r;
@@ -93,7 +93,7 @@ static uint64_t xdebug_counter_and_freq_to_nanotime(uint64_t counter, uint64_t f
 
 // Windows 7 and lower
 #if PHP_WIN32
-static uint64_t xdebug_get_nanotime_rel(xdebug_nanotime_context *nanotime_context)
+static inline uint64_t xdebug_get_nanotime_rel(xdebug_nanotime_context *nanotime_context)
 {
 	LARGE_INTEGER tcounter;
 
@@ -106,14 +106,14 @@ static uint64_t xdebug_get_nanotime_rel(xdebug_nanotime_context *nanotime_contex
 // Mac
 // should be fast but can be relative
 #elif __APPLE__
-static uint64_t xdebug_get_nanotime_rel(xdebug_nanotime_context *nanotime_context)
+static inline uint64_t xdebug_get_nanotime_rel(xdebug_nanotime_context *nanotime_context)
 {
 	return clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
 }
 
 // Linux/Unix with clock_gettime
 #elif CLOCK_MONOTONIC
-static uint64_t xdebug_get_nanotime_rel(xdebug_nanotime_context *nanotime_context)
+static inline uint64_t xdebug_get_nanotime_rel(xdebug_nanotime_context *nanotime_context)
 {
 	struct timespec ts;
 
@@ -122,6 +122,13 @@ static uint64_t xdebug_get_nanotime_rel(xdebug_nanotime_context *nanotime_contex
 	}
 
 	return 0;
+}
+#endif
+
+#if PHP_WIN32
+static inline uint64_t xdebug_get_rdtsc()
+{
+	return __rdtsc();
 }
 #endif
 
@@ -149,29 +156,60 @@ void xdebug_nanotime_init(void)
 #endif
 
 	context.start_abs = xdebug_get_nanotime_abs(&context);
+#if PHP_WIN32
+	context.start_rdtsc = xdebug_get_rdtsc();
+#endif
 	context.last_abs = 0;
 #if PHP_WIN32 | __APPLE__ | CLOCK_MONOTONIC
 	context.start_rel = xdebug_get_nanotime_rel(&context);
-	context.last_rel = 0;
 #endif
 
 	XG_BASE(nanotime_context) = context;
+
+#if PHP_WIN32
+	/* Calibrate TSC scale, wait at least 2 ms from start */
+	do {
+		__nop();
+	} while (xdebug_get_nanotime() - context.start_abs < 2 * NANOS_IN_MILLISEC);
+	XG_BASE(nanotime_context).rdtsc_to_nanos = (xdebug_get_nanotime() - context.start_abs)
+		/ (double)(xdebug_get_rdtsc() - context.start_rdtsc);
+#endif
 }
 
 uint64_t xdebug_get_nanotime(void)
 {
 	uint64_t nanotime;
 	xdebug_nanotime_context *context;
+	unsigned int min_step;
 
 	context = &XG_BASE(nanotime_context);
+
+	min_step = NANOTIME_MIN_STEP;
+
+#if PHP_WIN32
+	/* Windows has no timer with better resolution than 100 ns, use TSC timer which is
+	 * incremented at a constant rate on modern CPUs.
+	 * see https://stackoverflow.com/questions/63205226/better-than-100ns-resolution-timers-in-windows */
+	if (!isnan(context->rdtsc_to_nanos)) {
+		nanotime = context->start_abs + (uint64_t)((xdebug_get_rdtsc() - context->start_rdtsc) * context->rdtsc_to_nanos);
+
+		if (nanotime < context->last_abs_rdtsc + min_step) {
+			context->last_abs_rdtsc += min_step;
+			nanotime = context->last_abs_rdtsc;
+		}
+		context->last_abs_rdtsc = nanotime;
+
+		return nanotime;
+	}
+#endif
 
 #if PHP_WIN32 | __APPLE__ | CLOCK_MONOTONIC
 	/* Relative timing */
 	if (context->use_rel_time) {
 		nanotime = xdebug_get_nanotime_rel(context);
 
-		if (nanotime < context->last_rel + NANOTIME_MIN_STEP) {
-			context->last_rel += NANOTIME_MIN_STEP;
+		if (nanotime < context->last_rel + min_step) {
+			context->last_rel += min_step;
 			nanotime = context->last_rel;
 		}
 		context->last_rel = nanotime;
@@ -184,8 +222,8 @@ uint64_t xdebug_get_nanotime(void)
 	/* Absolute timing */
 	nanotime = xdebug_get_nanotime_abs(context);
 
-	if (nanotime < context->last_abs + NANOTIME_MIN_STEP) {
-		context->last_abs += NANOTIME_MIN_STEP;
+	if (nanotime < context->last_abs + min_step) {
+		context->last_abs += min_step;
 		nanotime = context->last_abs;
 	}
 	context->last_abs = nanotime;
